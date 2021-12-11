@@ -1,0 +1,176 @@
+---
+title: "Final: Introducción al análisis de datos espaciales"
+author: "Federico Acosta y Lara"
+date: "12/8/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+```
+
+```{r librerias}
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+library(sf)
+library(ggspatial) #para agregar norte y escala
+library(leaflet)
+
+```
+
+## EJERCICIO 1
+Mapa con referencias, norte y escala.
+
+```{r bases}
+Data <- read.csv2(here::here("Data", "Base_municipios2015.csv"))
+DataDep <- read.csv2(here::here("Data", "ResultadosDep_2015.csv"))
+Municipios <- read_sf(here::here("Data","Pais_municipios.shp"))
+Departamentos <- read_sf(here::here("Data","Departamentos.shp"))
+
+```
+
+```{r ajustes en las bases}
+
+#Reemplazo los caracteres unicode por letras
+Departamentos$nombre <- gsub("\xd3", "O", Departamentos$nombre)
+Departamentos$nombre <- gsub("\xda", "U", Departamentos$nombre)
+Departamentos$nombre <- gsub("\xcd", "I", Departamentos$nombre)
+Departamentos$nombre <- gsub("\xc9", "E", Departamentos$nombre)
+
+Municipios$municipio <- gsub("\xc1", "A", Municipios$municipio)
+Municipios$municipio <- gsub("\xc9", "E", Municipios$municipio)
+Municipios$municipio <- gsub("\xcd", "I", Municipios$municipio)
+Municipios$municipio <- gsub("\xd3", "O", Municipios$municipio)
+Municipios$municipio <- gsub("\xda", "U", Municipios$municipio)
+Municipios$municipio <- gsub("\xd1", "N", Municipios$municipio)
+
+#Elimino las entradas que no están en ambas bases
+Municipios <- Municipios[!(Municipios$municipio %in% Data$MUNICIPIO == FALSE),]
+Data <- Data[!(Data$MUNICIPIO %in% Municipios$municipio == FALSE),]
+
+```
+
+```{r cálculo de porcentajes}
+
+Data$Total <- rowSums(Data[,3:length(Data)])
+Data$FAp <- round(100*Data$FA/Data$Total,2)
+Data$PNp <- round(100*Data$PN/Data$Total, 2)
+Data$PCp <- round(100*Data$PC/Data$Total, 2)
+Data$COp <- round(100*Data$PCONCERTACION/Data$Total, 2)
+```
+
+```{r determinación del ganador}
+
+Data$Ganador <- apply(Data[,c("FA", "PN", "PC")], 1, which.max)
+
+Data$Ganador[Data$Ganador==1] <- "FA"
+Data$Ganador[Data$Ganador==2] <- "PN"
+Data$Ganador[Data$Ganador==3] <- "PC"
+
+```
+
+```{r join - base para graficar}
+DAT <- left_join(Municipios, Data, by=c("municipio"="MUNICIPIO"))
+DAT$Ganador <- as.factor(DAT$Ganador)
+```
+
+```{r gráfico, include=TRUE, echo=FALSE}
+
+PLOTGanador <- ggplot() + 
+        geom_sf(data = Departamentos,lwd = 0.3, color="black") + 
+        geom_sf(data=DAT, aes(fill=Ganador),lwd = 0.3, color="black") +
+        scale_fill_manual(values=c("goldenrod", "firebrick", "dodgerblue3")) +
+        annotation_scale(style="bar") +
+        annotation_north_arrow(location='tr') +
+         labs(x = "Longitud", y = "Latitud",
+              title = "Partido político ganador por municipio", 
+              subtitle = "Elección municipal 2015",
+              caption = "Elaboración en base a datos de la Corte Electoral") +
+        theme_calc()
+
+PLOTGanador
+
+```
+
+
+## EJERCICIO 2
+Leaflet.
+
+```{r centroides para la capa de puntos}
+
+sf::sf_use_s2(FALSE) # https://stackoverflow.com/questions/68478179/how-to-resolve-spherical-geometry-failures-when-joining-spatial-data
+
+Departamentos <- Departamentos[Departamentos$nombre != "LIMITE CONTESTADO",] # Elimino esta entrada
+
+Centroids <- st_cast(Departamentos, "POLYGON")
+Centroids <- st_centroid(Centroids)
+Centroids <- st_transform(Centroids)
+
+Centroids$lng <- st_coordinates(Centroids)[,1] # Separo latitud y longitud en columnas aparte
+Centroids$lat <- st_coordinates(Centroids)[,2]
+
+```
+
+```{r join base para capa de puntos}
+
+DATDep <- left_join(Centroids, DataDep, by=c("nombre"="DEPARTAMENTO"))
+```
+
+```{r paletas colores}
+bins <- c(0, 10, 20, 30, 40, 50, 65, 80, Inf)
+
+palFA <- colorBin("Greens", domain = DAT$FAp, bins = bins)
+palPN <- colorBin("PuBu", domain = DAT$PNp, bins = bins)
+palPC <- colorBin("YlOrRd", domain = DAT$PCp, bins = bins)
+palCO <- colorBin("BuPu", domain = DAT$PCONCERTACION, bins = bins)
+```
+
+```{r leaflet, include=TRUE, echo=FALSE}
+
+PLOT <- leaflet(DAT) %>% 
+        #Orden de capas
+                 addMapPane(name = "polygons", zIndex = 410) %>% 
+                 addMapPane(name = "maplabels", zIndex = 420) %>%
+                 addMapPane(name = "points", zIndex=430) %>% 
+        # Mapas de base
+                 addProviderTiles(providers$CartoDB.PositronNoLabels) %>%
+                 addProviderTiles(providers$CartoDB.VoyagerOnlyLabels,group = "Labels", 
+                                  options = leafletOptions(pane = "maplabels")) %>%
+        # Centra en UY y establece zoom
+                 setView(lng=-55, lat=-32.5 , zoom=5.5) %>%
+        # Capa con geometrías de los departamentos
+                 addPolygons(data=Departamentos, stroke = TRUE, opacity = .8,fillOpacity =0,
+                             smoothFactor = 0.1, color="black", weight = 1) %>%
+        # Capa polígonos de munuicipios y datos en popups
+                 addPolygons(fillColor =  ~palFA(FAp), stroke = TRUE, opacity = .8, group = "FA",
+                             fillOpacity = .6,smoothFactor = 0.1, color="black", weight = 1,
+                             popup = paste0(DAT$municipio,"<br>", "FA:",DAT$FAp,"%")) %>% 
+                 addPolygons(fillColor =  ~palPN(PNp), stroke = TRUE, opacity = .8, group = "PN",
+                             fillOpacity = .6,smoothFactor = 0.1, color="black", weight = 1,
+                             popup = paste0(DAT$municipio,"<br>", "PN:",DAT$PNp,"%")) %>%
+                 addPolygons(fillColor =  ~palPC(PCp), stroke = TRUE, opacity = .8, group = "PC",
+                             fillOpacity = .6,smoothFactor = 0.1, color="black", weight = 1,
+                             popup = paste0(DAT$municipio,"<br>", "PC:",DAT$PCp,"%")) %>%
+                 addPolygons(fillColor =  ~palCO(COp), stroke = TRUE, opacity = .8, group = "CO",
+                             fillOpacity = .6,smoothFactor = 0.1, color="black", weight = 1,
+                             popup = paste0(DAT$municipio,"<br>", "CO:",DAT$COp,"%")) %>%
+        # Capa con puntos y popups
+                 addCircles(data=DATDep, 
+                            popup = paste0( "Dep:", DATDep$nombre, "<br>",
+                                            "FA:", 100*(round(DATDep$FA,4)), "%","<br>",
+                                            "PN:", 100*(round(DATDep$PN,4)), "%","<br>",
+                                            "PC:", 100*(round(DATDep$PC,4)), "%","<br>",
+                                            "CO:", 100*(round(DATDep$CO,4)), "%"),
+                            options = leafletOptions(pane = "points")) %>%
+        # Controladores
+                 addLayersControl(overlayGroups = c("Labels"),
+                                   baseGroups = c("FA", "PN", "PC", "CO"),
+                                  options = layersControlOptions(collapsed = F)) 
+        
+                
+PLOT
+```
+
